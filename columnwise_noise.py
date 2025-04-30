@@ -76,8 +76,11 @@ def analyze_binned_noise_stats(movies, masks, bin_size=2):
         "bin_size": bin_size
     }
 if __name__ == '__main__':
-    movie_folder = '/media/alineos1/42368BE57732CF06/Swept_Hilo/04022025/Halo_REST_12F/Dstorm'
-    mask_folder = '/media/alineos1/42368BE57732CF06/Swept_Hilo/04022025/Halo_REST_12F/Dstorm/masks'
-    movies = [tifffile.imread(file)[-20:,:,:] for file in glob.glob(movie_folder + '/*.tif')]
-    masks =[io.imread(file) for file in glob.glob(mask_folder + '/*_seg.tif')]
+    movie_folder = '/media/alineos1/42368BE57732CF06/Swept_Hilo/04202025/HEK/v520_Halo_H2B/Dstorm'
+    mask_folder = '/media/alineos1/42368BE57732CF06/Swept_Hilo/04202025/HEK/v520_Halo_H2B/Dstorm/single_mov_tracking/masks'
+    movies = [tifffile.imread(file)[-20:,:,:] for file in sorted(glob.glob(movie_folder + '/*.tif'))[:10]]
+    masks =[io.imread(file) for file in sorted(glob.glob(mask_folder + '/*_seg.tif'))[:10]]
     noises = analyze_binned_noise_stats(movies, masks)
+    import pickle
+    with open('H2B_calculated_bg_noise.pkl','rb') as fh:
+        noises = pickle.load(fh)

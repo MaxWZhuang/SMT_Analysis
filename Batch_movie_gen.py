@@ -41,7 +41,7 @@ class Read_cell_ols:
         self.trajectories = trajectories
         self.trajectory_groups = [group for _, group in trajectories.groupby('trajectory')]
         self.cell_mask = cell_mask
-        self.molecule_profiles = [m for m in molecule_profiles if m.shape == (7, 7)]
+        self.molecule_profiles = [m for m in molecule_profiles if m.shape == (5, 5)]
         self.density_per_cell = density_per_cell
         self.noise = noise  # noise["cell"]["mean"], noise["bg"]["std"], etc.
         self.random_seed = random_seed
@@ -131,9 +131,10 @@ class Read_cell_ols:
                 
                     profile = random.choice(self.molecule_profiles)
                     profile = np.clip(profile - np.median(profile), 0, None)
-                    profile *= molecule_scale 
+                    profile *= molecule_scale
+                    
                     self._insert_molecule(x, y, t, profile)
-                    adjusted_traj.append((x, y, t))
+                    adjusted_traj.append((x, y ,t)) # max pixel as molecule position rather than profile center
                 
                 # Store the full adjusted trajectory
                 if adjusted_traj:
@@ -159,22 +160,31 @@ class Read_cell_ols:
         )
         all_trajs.to_csv(filename, index=False)
 
-A = pd.read_pickle('/home/alineos1/Documents/codes/full_saved_regions.pkl')
-cell_mask = io.imread('/media/alineos1/42368BE57732CF06/Swept_Hilo/04022025/Halo_REST_4D/Dstorm/masks/Mask_2_seg.tif')
+def filter_and_crop_profiles(profiles):
+    """
+    Filters 7x7 profiles where the maximum is within the central 3x3,
+    and crops to 5x5 centered on the peak.
 
-tracks = strobe_multistate(
-        100000,   # 10000 trajectories
-        [0.1, 3.0, 8.0],     # diffusion coefficient, microns squared per sec
-        [0.3, 0.5, 0.2],     # state occupancies
-        motion="brownian",
-        geometry="sphere",
-        radius=5.0,
-        dz=0.7,
-        frame_interval=0.01,
-        loc_error=0.035,
-        track_len=100,
-        bleach_prob=0.1)
-from columnwise_noise import analyze_binned_noise_stats
+    Args:
+        profiles (list of np.ndarray): List of 7x7 numpy arrays.
+
+    Returns:
+        List of 5x5 numpy arrays with peak at center.
+    """
+    filtered = []
+    for p in profiles:
+        if p.shape != (7, 7):
+            continue  # skip invalid shapes
+
+        max_idx = np.unravel_index(np.argmax(p), p.shape)
+        if 2 <= max_idx[0] <= 4 and 2 <= max_idx[1] <= 4:
+            # Crop 5x5 centered on max
+            y, x = max_idx
+            cropped = p[y-2:y+3, x-2:x+3]
+            if cropped.shape == (5, 5):
+                filtered.append(cropped)
+    return filtered
+
 
 # movie_folder = '/media/alineos1/42368BE57732CF06/Swept_Hilo/04022025/Halo_REST_12F/Dstorm'
 # mask_folder = '/media/alineos1/42368BE57732CF06/Swept_Hilo/04022025/Halo_REST_12F/Dstorm/masks'
@@ -191,13 +201,13 @@ def simulate_molecule_scale_series(
     cell_mask,
     molecule_profiles,
     noise,
-    density_per_cell=100,
-    max_frames=200,
+    density_per_cell=50,
+    max_frames=100,
     base_seed=818
 ):
     os.makedirs(output_dir, exist_ok=True)
 
-    scale_values = np.linspace(0.6, 1.5, 10)
+    scale_values = np.linspace(0.6, 1.4, 5)
     for scale in scale_values:
         print(f"Simulating movie with molecule_scale = {scale:.2f}")
 
@@ -214,9 +224,33 @@ def simulate_molecule_scale_series(
         simulator.simulate(molecule_scale=scale, noise_scale=1.0)
         simulator.save_movie(filename = os.path.join(output_dir, f"movie_mscale_{scale:.2f}.tif"))
         simulator.save_track(filename = os.path.join(output_dir, f"trajectories_mscale_{scale:.2f}.csv"))
-
-
-simulate_molecule_scale_series(output_dir='/home/alineos1/Documents/movie_simu',
-                               trajectories=tracks, cell_mask=cell_mask, molecule_profiles=A,
-                               noise=noises)
+if __name__ == '__main__':
+        
+    tracks = strobe_multistate(
+            100000,   # 10000 trajectories
+            [0.1, 0.5, 5.0],     # diffusion coefficient, microns squared per sec
+            [0.3, 0.5, 0.2],     # state occupancies
+            motion="brownian",
+            geometry="sphere",
+            radius=5.0,
+            dz=0.7,
+            frame_interval=0.01,
+            loc_error=0.035,
+            track_len=100,
+            bleach_prob=0.05)
+    from columnwise_noise import analyze_binned_noise_stats
+    pixel_size = 0.108
+    tracks['x'] = tracks['x'] / pixel_size
+    tracks['y'] = tracks['y'] / pixel_size
+    A = pd.read_pickle('/home/alineos1/Documents/codes/full_saved_regions.pkl')
+    A = filter_and_crop_profiles(A)
+    cell_mask1 = io.imread('/media/alineos1/42368BE57732CF06/Swept_Hilo/04022025/Halo_REST_4D/Dstorm/masks/Mask_2_seg.tif')
+    cell_mask2 = io.imread('/media/alineos1/42368BE57732CF06/Swept_Hilo/04022025/Halo_REST_4D/Dstorm/masks/Mask_4_seg.tif')
+    cell_mask3 = io.imread('/media/alineos1/42368BE57732CF06/Swept_Hilo/04022025/Halo_REST_4D/Dstorm/masks/Mask_6_seg.tif')
+    cell_masks = [cell_mask1, cell_mask2, cell_mask3]
+    for i, cell_mask in enumerate(cell_masks):
+        output_dir = f'/home/alineos1/Documents/movie_simu/mask_{i}' 
+        simulate_molecule_scale_series(output_dir=output_dir,
+                                       trajectories=tracks, cell_mask=cell_mask, molecule_profiles=A,
+                                       noise=noises, base_seed= 818*i)
 
