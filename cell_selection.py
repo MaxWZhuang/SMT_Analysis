@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import argparse
 
 import numpy as np
@@ -12,20 +13,18 @@ from skimage.measure import regionprops, label
 from skimage.filters import gaussian
 from skimage.color import label2rgb
 
-def segment_nuclei(frame, model, diameter):
+def segment_nuclei(frame, model, diameter=None):
     """
     Run Cellpose on a single grayscale frame (using the Hoscht label) to get an integer label mask.
     """
     masks, flows, styles, diams = model.eval(
-        frame, diameter=diameter, channels=[0,0]
+        tifffile.imread(frame), diameter=diameter, channels=[0,0]
     )
     return masks
 
 def analyze_frame_validate(
-    nuclei_frame,
+    masks,
     signal_frame,
-    model,
-    diameter,
     percentile=90,
     max_area=300,
     intensity_factor=2.0
@@ -41,20 +40,20 @@ def analyze_frame_validate(
     • list of dicts with per-nucleus stats including a 'validated' flag
     """
     # 1) segment nuclei
-    masks = segment_nuclei(nuclei_frame, model, diameter)
-    nuc_props = regionprops(masks, intensity_image=signal_frame)
+    signal_image = tifffile.imread(signal_frame)
+    nuc_props = regionprops(masks, intensity_image=signal_image)
     results = []
 
     for prop in nuc_props:
         lab = prop.label #label of the RegionProperties object, which is a nucleus
         region_mask = (masks == lab) # only the arrays where the pixels belong to the nucleus
-        intensities = signal_frame[region_mask] #1d array of all pixel values inside the nucleus
+        intensities = signal_image[region_mask] #1d array of all pixel values inside the nucleus
 
         # 2) threshold at the given percentile
         thr = np.percentile(intensities, percentile) # change this to be something like
 
         # 3) mask of candidate bright pixels
-        bright_mask = (signal_frame >= thr) & region_mask
+        bright_mask = (signal_image >= thr) & region_mask
 
         # 4) label connected bright areas
         bright_labels = label(bright_mask)
@@ -71,7 +70,7 @@ def analyze_frame_validate(
         # 5) pick the region with highest total intensity (mean*area)
         best_reg = None
         best_score = -np.inf
-        for r in regionprops(bright_labels, intensity_image=signal_frame):
+        for r in regionprops(bright_labels, intensity_image=signal_image):
             total_int = r.mean_intensity * r.area
             if total_int > best_score:
                 best_score = total_int
@@ -80,7 +79,7 @@ def analyze_frame_validate(
         # compute rest-of-nucleus intensity
         best_mask = (bright_labels == best_reg.label)
         rest_mask = region_mask & ~best_mask
-        mean_rest = float(signal_frame[rest_mask].mean()) if rest_mask.any() else 0.0
+        mean_rest = float(signal_image[rest_mask].mean()) if rest_mask.any() else 0.0
         mean_bright = float(best_reg.mean_intensity)
 
         # validation criteria
@@ -104,40 +103,61 @@ def analyze_frame_validate(
     return masks, results
 
 def process_movie(
-    infile, mask_channel, signal_channel,
-    diameter, min_distance, show
-):
-    # load the entire movie: assume shape (T, C, Y, X)
-    movie = tifffile.imread(infile)
-    assert movie.ndim == 4, "Expecting a 4D TIFF (time,channel,y,x)"
+    nuclei_folder, 
+    signal_folder,
+    naming_syntax = "_Iter_",
+    show = True #for RegEX
+): 
+    """
+    Processes sequences of images (one for nucleus labeling, one for finding signal). It uses a specific naming quirk to perform regex and 
+    produce accurate matching.
 
-    # load Cellpose model once
-    model = models.CellposeModel(pretrained_model='nuclei')
-
+    Args:
+        nuclei_folder (_type_): Folder where the nucleus images are stored
+        signal_folder (_type_): Folder where the signal images are stored
+        naming_syntax (_type_, optional): _description_. Defaults to "_Iter_" forRegEX (where the following 4 numbers are used to match).
+    """
+    pattern = re.compile(rf"{naming_syntax}(\d+)")
+    
+    nuclei_files = {}
+    for nuclei_file_name in os.listdir(nuclei_folder):
+        full_pathname = os.path.join(nuclei_folder, nuclei_file_name)
+        if not os.path.is_file(full_pathname):
+            continue
+        match = pattern.search(nuclei_file_name)
+        if match: #if key exists
+            nuclei_files[match.group(1)] = full_pathname
+    
+    signal_files = {}
+    for signal_file_name in os.listdir(signal_folder):
+        full_pathname = os.path.join(signal_folder, signal_file_name)
+        if not os.path.is_file(full_pathname):
+            continue
+        match = pattern.search(signal_file_name)
+        if match: #if key exists
+            signal_files[match.group(1)] = full_pathname
+            
+    model = models.CellposeModel(pretrained_model="nuclei")
+    
+    if show: 
+        fig, ax = plt.subplots(figsize = (16, 16), dpi = 200)
+    
     all_stats = []
-    for t in range(movie.shape[0]):
-        nuc = movie[t, mask_channel]
-        sig = movie[t, signal_channel]
-
+    for key in sorted(nuclei_files.keys()):
+        if (key not in signal_files.keys()):
+            continue
+        nucleus_frame = nuclei_files.get(key)
+        signal_frame = signal_files.get(key)
+        
         masks, stats = analyze_frame_validate(
-            nuc, sig, model, diameter, min_distance
+            segment_nuclei(nucleus_frame, model), 
+            signal_frame,
+            # optionally, you may also tweak thresholds here
         )
         all_stats.append(stats)
 
-        if show:
-            # overlay nuclei on signal
-            overlay = label2rgb(masks, image=sig, bg_label=0, alpha=0.4)
-            fig, ax = plt.subplots(1,1, figsize=(6,6))
-            ax.imshow(overlay, cmap='gray')
-            # plot spot centers
-            ys = [s['spot_y'] for s in stats]
-            xs = [s['spot_x'] for s in stats]
-            ax.scatter(xs, ys, c='r', s=30, label='brightest spot')
-            ax.set_title(f"Frame {t}")
-            ax.axis('off')
-            plt.show()
-
     return all_stats
+    
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(
